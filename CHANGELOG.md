@@ -1,3 +1,15 @@
+# [17.0.0-RC.12](https://github.com/super-productivity/super-productivity/compare/v17.0.0-RC.11...v17.0.0-RC.12) (2026-01-18)
+
+### Bug Fixes
+
+- **tour:** update tour for tabbed settings page ([dab4762](https://github.com/super-productivity/super-productivity/commit/dab4762f250a4eb74f079957dc9a44af9011adb0))
+
+# [17.0.0-RC.11](https://github.com/super-productivity/super-productivity/compare/v17.0.0-RC.10...v17.0.0-RC.11) (2026-01-18)
+
+### Bug Fixes
+
+- **e2e:** create missing .env file and update GitHub Actions syntax ([1f4eecb](https://github.com/super-productivity/super-productivity/commit/1f4eecbe70130dc005b5d99885b7eaf35397ec0d))
+
 # [17.0.0-RC.10](https://github.com/super-productivity/super-productivity/compare/v17.0.0-RC.9...v17.0.0-RC.10) (2026-01-18)
 
 # [17.0.0-RC.9](https://github.com/super-productivity/super-productivity/compare/v17.0.0-RC.8...v17.0.0-RC.9) (2026-01-17)
