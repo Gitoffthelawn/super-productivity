@@ -448,11 +448,12 @@ export class SyncWrapperService {
         }
       }
     } catch (error) {
-      SyncLog.err(error);
+      SyncLog.err(`Failed to configure auth for provider ${providerId}:`, error);
       this._snackService.open({
         // TODO don't limit snack to dropbox
         msg: T.F.DROPBOX.S.UNABLE_TO_GENERATE_PKCE_CHALLENGE,
         type: 'ERROR',
+        config: { duration: 0 }, // Stay visible until dismissed for critical setup errors
       });
       return { wasConfigured: false };
     }
