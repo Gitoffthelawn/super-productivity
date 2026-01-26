@@ -7,6 +7,9 @@ import { switchMap, tap } from 'rxjs/operators';
 import { PrivateCfgByProviderId, SyncProviderId } from '../../op-log/sync-exports';
 import { DEFAULT_GLOBAL_CONFIG } from '../../features/config/default-global-config.const';
 import { SyncLog } from '../../core/log';
+import { DerivedKeyCacheService } from '../../op-log/encryption/derived-key-cache.service';
+import { SuperSyncPrivateCfg } from '../../op-log/sync-providers/super-sync/super-sync.model';
+import { WrappedProviderService } from '../../op-log/sync-providers/wrapped-provider.service';
 
 // Maps sync providers to their corresponding form field in SyncConfig
 // Dropbox is null because it doesn't store settings in the form (uses OAuth)
@@ -83,6 +86,8 @@ const PROVIDER_FIELD_DEFAULTS: Record<
 export class SyncConfigService {
   private _providerManager = inject(SyncProviderManager);
   private _globalConfigService = inject(GlobalConfigService);
+  private _derivedKeyCache = inject(DerivedKeyCacheService);
+  private _wrappedProvider = inject(WrappedProviderService);
 
   private _lastSettings: SyncConfig | null = null;
 
@@ -177,10 +182,23 @@ export class SyncConfigService {
     }
     const oldConfig = await activeProvider.privateCfg.load();
 
-    await this._providerManager.setProviderConfig(activeProvider.id, {
+    // Build new config - for SuperSync, always enable encryption when password is set
+    const newConfig = {
       ...oldConfig,
       encryptKey: pwd,
-    } as PrivateCfgByProviderId<SyncProviderId>);
+    } as PrivateCfgByProviderId<SyncProviderId>;
+
+    // For SuperSync, explicitly enable encryption
+    if (activeProvider.id === SyncProviderId.SuperSync) {
+      (newConfig as SuperSyncPrivateCfg).isEncryptionEnabled = true;
+    }
+
+    await this._providerManager.setProviderConfig(activeProvider.id, newConfig);
+
+    // Clear cached encryption keys to force re-derivation with new password
+    this._derivedKeyCache.clearCache();
+    // Clear cached adapters to force recreation with new encryption settings
+    this._wrappedProvider.clearCache();
   }
 
   async updateSettingsFromForm(newSettings: SyncConfig, isForce = false): Promise<void> {
@@ -259,17 +277,42 @@ export class SyncConfigService {
       {} as Record<string, unknown>,
     );
 
+    // The provider's saved config is the source of truth after EncryptionDisableService runs
+    // oldConfig is loaded from activeProvider.privateCfg.load()
+    // When encryption is explicitly disabled, we must clear encryptKey regardless of form state
+    const isEncryptionDisabledInSavedConfig =
+      providerId === SyncProviderId.SuperSync &&
+      (oldConfig as { isEncryptionEnabled?: boolean })?.isEncryptionEnabled === false;
+
     const configWithDefaults = {
       ...PROVIDER_FIELD_DEFAULTS[providerId],
       ...oldConfig,
       ...nonEmptyFormValues, // Only non-empty values overwrite saved config
-      // Use provider specific key if available, otherwise fallback to root key
-      encryptKey: (nonEmptyFormValues?.encryptKey as string) || settings.encryptKey || '',
+      // Clear encryptKey when encryption is disabled (saved config is source of truth)
+      // Otherwise use provider specific key if available, then fallback to root key
+      encryptKey: isEncryptionDisabledInSavedConfig
+        ? ''
+        : (nonEmptyFormValues?.encryptKey as string) || settings.encryptKey || '',
     };
+
+    // Check if encryption settings changed to clear cached keys
+    const oldEncryptKey = (oldConfig as { encryptKey?: string })?.encryptKey;
+    const newEncryptKey = configWithDefaults.encryptKey as string;
+    const isEncryptionChanged = oldEncryptKey !== newEncryptKey;
 
     await this._providerManager.setProviderConfig(
       providerId,
       configWithDefaults as PrivateCfgByProviderId<SyncProviderId>,
     );
+
+    // Clear cache on ANY encryption change (not just disable)
+    if (isEncryptionChanged && (oldEncryptKey || newEncryptKey)) {
+      SyncLog.normal(
+        'SyncConfigService: Encryption settings changed, clearing cached keys',
+      );
+      this._derivedKeyCache.clearCache();
+      // Clear cached adapters to force recreation with new encryption settings
+      this._wrappedProvider.clearCache();
+    }
   }
 }

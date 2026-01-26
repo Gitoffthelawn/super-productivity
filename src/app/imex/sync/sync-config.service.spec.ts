@@ -8,6 +8,7 @@ import { LegacySyncProvider } from './legacy-sync-provider.model';
 import { SyncProviderId } from '../../op-log/sync-exports';
 import { DEFAULT_GLOBAL_CONFIG } from '../../features/config/default-global-config.const';
 import { first } from 'rxjs/operators';
+import { WrappedProviderService } from '../../op-log/sync-providers/wrapped-provider.service';
 
 describe('SyncConfigService', () => {
   let service: SyncConfigService;
@@ -50,11 +51,16 @@ describe('SyncConfigService', () => {
       },
     );
 
+    const wrappedProviderServiceSpy = jasmine.createSpyObj('WrappedProviderService', [
+      'clearCache',
+    ]);
+
     TestBed.configureTestingModule({
       providers: [
         SyncConfigService,
         { provide: SyncProviderManager, useValue: providerManagerSpy },
         { provide: GlobalConfigService, useValue: globalConfigServiceSpy },
+        { provide: WrappedProviderService, useValue: wrappedProviderServiceSpy },
       ],
     });
 
@@ -965,6 +971,305 @@ describe('SyncConfigService', () => {
       expect(formSettings!.webDav!.syncFolderPath).toBe(
         DEFAULT_GLOBAL_CONFIG.sync.webDav!.syncFolderPath,
       );
+    });
+  });
+
+  describe('updateEncryptionPassword', () => {
+    it('should set isEncryptionEnabled=true when updating password for SuperSync', async () => {
+      // Setup SuperSync provider with encryption disabled
+      const mockProvider = {
+        id: SyncProviderId.SuperSync,
+        privateCfg: {
+          load: jasmine.createSpy('load').and.returnValue(
+            Promise.resolve({
+              baseUrl: 'http://test.com',
+              userName: 'test',
+              password: 'test',
+              accessToken: 'token',
+              syncFolderPath: '/',
+              encryptKey: 'oldpass',
+              isEncryptionEnabled: false,
+            }),
+          ),
+        },
+      };
+      (providerManager.getProviderById as jasmine.Spy).and.returnValue(mockProvider);
+      (providerManager.getActiveProvider as jasmine.Spy).and.returnValue(mockProvider);
+
+      // Update password
+      await service.updateEncryptionPassword('newpass', SyncProviderId.SuperSync);
+
+      // Verify both encryptKey and isEncryptionEnabled are updated
+      expect(providerManager.setProviderConfig).toHaveBeenCalledWith(
+        SyncProviderId.SuperSync,
+        jasmine.objectContaining({
+          encryptKey: 'newpass',
+          isEncryptionEnabled: true,
+        }),
+      );
+    });
+
+    it('should not add isEncryptionEnabled for non-SuperSync providers', async () => {
+      // Setup WebDAV provider
+      const mockProvider = {
+        id: SyncProviderId.WebDAV,
+        privateCfg: {
+          load: jasmine.createSpy('load').and.returnValue(
+            Promise.resolve({
+              baseUrl: 'http://test.com',
+              userName: 'test',
+              password: 'test',
+              syncFolderPath: '/',
+              encryptKey: 'oldpass',
+            }),
+          ),
+        },
+      };
+      (providerManager.getProviderById as jasmine.Spy).and.returnValue(mockProvider);
+      (providerManager.getActiveProvider as jasmine.Spy).and.returnValue(mockProvider);
+
+      // Update password
+      await service.updateEncryptionPassword('newpass', SyncProviderId.WebDAV);
+
+      // Verify only encryptKey is updated (no isEncryptionEnabled field)
+      const callArgs = (
+        providerManager.setProviderConfig as jasmine.Spy
+      ).calls.mostRecent().args[1];
+      expect(callArgs.encryptKey).toBe('newpass');
+      expect(callArgs.isEncryptionEnabled).toBeUndefined();
+    });
+
+    it('should preserve existing config when updating password', async () => {
+      // Setup SuperSync provider with existing config
+      const existingConfig = {
+        baseUrl: 'https://my-server.com',
+        userName: 'testuser',
+        password: 'testpass',
+        accessToken: 'existing-token',
+        syncFolderPath: '/my-sync',
+        encryptKey: 'oldpass',
+        isEncryptionEnabled: false,
+      };
+
+      const mockProvider = {
+        id: SyncProviderId.SuperSync,
+        privateCfg: {
+          load: jasmine
+            .createSpy('load')
+            .and.returnValue(Promise.resolve(existingConfig)),
+        },
+      };
+      (providerManager.getProviderById as jasmine.Spy).and.returnValue(mockProvider);
+      (providerManager.getActiveProvider as jasmine.Spy).and.returnValue(mockProvider);
+
+      // Update password
+      await service.updateEncryptionPassword('newpass', SyncProviderId.SuperSync);
+
+      // Verify all existing config is preserved except the updated fields
+      expect(providerManager.setProviderConfig).toHaveBeenCalledWith(
+        SyncProviderId.SuperSync,
+        jasmine.objectContaining({
+          baseUrl: 'https://my-server.com',
+          userName: 'testuser',
+          password: 'testpass',
+          accessToken: 'existing-token',
+          syncFolderPath: '/my-sync',
+          encryptKey: 'newpass',
+          isEncryptionEnabled: true,
+        }),
+      );
+    });
+  });
+
+  describe('Cache Clearing on Encryption Changes', () => {
+    let wrappedProviderService: jasmine.SpyObj<WrappedProviderService>;
+
+    beforeEach(() => {
+      wrappedProviderService = TestBed.inject(
+        WrappedProviderService,
+      ) as jasmine.SpyObj<WrappedProviderService>;
+    });
+
+    it('should clear cache when encryption is disabled', async () => {
+      // Mock existing provider config with encryption
+      const mockProvider = {
+        id: SyncProviderId.WebDAV,
+        privateCfg: {
+          load: jasmine.createSpy('load').and.returnValue(
+            Promise.resolve({
+              baseUrl: 'https://example.com/dav',
+              userName: 'user',
+              password: 'pass',
+              syncFolderPath: '/sync',
+              encryptKey: 'oldPassword', // Has encryption
+            }),
+          ),
+        },
+      };
+      (providerManager.getProviderById as jasmine.Spy).and.returnValue(mockProvider);
+
+      // Spy on cache clear
+      const clearCacheSpy = spyOn(service['_derivedKeyCache'], 'clearCache');
+
+      // Update settings to disable encryption
+      await service.updateSettingsFromForm({
+        syncProvider: SyncProviderId.WebDAV as any,
+        encryptKey: '', // No encryption key
+        webDav: {
+          baseUrl: 'https://example.com/dav',
+          userName: 'user',
+          password: 'pass',
+          syncFolderPath: '/sync',
+        },
+      } as SyncConfig);
+
+      // Verify both caches were cleared
+      expect(clearCacheSpy).toHaveBeenCalled();
+      expect(wrappedProviderService.clearCache).toHaveBeenCalled();
+    });
+
+    it('should clear cache when encryption password changes', async () => {
+      // Mock existing provider config with old password
+      const mockProvider = {
+        id: SyncProviderId.WebDAV,
+        privateCfg: {
+          load: jasmine.createSpy('load').and.returnValue(
+            Promise.resolve({
+              baseUrl: 'https://example.com/dav',
+              userName: 'user',
+              password: 'pass',
+              syncFolderPath: '/sync',
+              encryptKey: 'oldPassword',
+            }),
+          ),
+        },
+      };
+      (providerManager.getProviderById as jasmine.Spy).and.returnValue(mockProvider);
+
+      // Spy on cache clear
+      const clearCacheSpy = spyOn(service['_derivedKeyCache'], 'clearCache');
+
+      // Update settings with new encryption password
+      await service.updateSettingsFromForm({
+        syncProvider: SyncProviderId.WebDAV as any,
+        encryptKey: 'newPassword', // Different password
+        webDav: {
+          baseUrl: 'https://example.com/dav',
+          userName: 'user',
+          password: 'pass',
+          syncFolderPath: '/sync',
+        },
+      } as SyncConfig);
+
+      // Verify both caches were cleared
+      expect(clearCacheSpy).toHaveBeenCalled();
+      expect(wrappedProviderService.clearCache).toHaveBeenCalled();
+    });
+
+    it('should clear cache when encryption is enabled', async () => {
+      // Mock existing provider config without encryption
+      const mockProvider = {
+        id: SyncProviderId.WebDAV,
+        privateCfg: {
+          load: jasmine.createSpy('load').and.returnValue(
+            Promise.resolve({
+              baseUrl: 'https://example.com/dav',
+              userName: 'user',
+              password: 'pass',
+              syncFolderPath: '/sync',
+              encryptKey: '', // No encryption initially
+            }),
+          ),
+        },
+      };
+      (providerManager.getProviderById as jasmine.Spy).and.returnValue(mockProvider);
+
+      // Spy on cache clear
+      const clearCacheSpy = spyOn(service['_derivedKeyCache'], 'clearCache');
+
+      // Update settings to enable encryption
+      await service.updateSettingsFromForm({
+        syncProvider: SyncProviderId.WebDAV as any,
+        encryptKey: 'newPassword', // Enable encryption
+        webDav: {
+          baseUrl: 'https://example.com/dav',
+          userName: 'user',
+          password: 'pass',
+          syncFolderPath: '/sync',
+        },
+      } as SyncConfig);
+
+      // Verify both caches were cleared
+      expect(clearCacheSpy).toHaveBeenCalled();
+      expect(wrappedProviderService.clearCache).toHaveBeenCalled();
+    });
+
+    it('should NOT clear cache when encryption key unchanged', async () => {
+      // Mock existing provider config with encryption
+      const mockProvider = {
+        id: SyncProviderId.WebDAV,
+        privateCfg: {
+          load: jasmine.createSpy('load').and.returnValue(
+            Promise.resolve({
+              baseUrl: 'https://example.com/dav',
+              userName: 'user',
+              password: 'pass',
+              syncFolderPath: '/sync',
+              encryptKey: 'samePassword',
+            }),
+          ),
+        },
+      };
+      (providerManager.getProviderById as jasmine.Spy).and.returnValue(mockProvider);
+
+      // Spy on cache clear
+      const clearCacheSpy = spyOn(service['_derivedKeyCache'], 'clearCache');
+
+      // Update settings with same encryption password
+      await service.updateSettingsFromForm({
+        syncProvider: SyncProviderId.WebDAV as any,
+        encryptKey: 'samePassword', // Same password
+        webDav: {
+          baseUrl: 'https://example.com/dav',
+          userName: 'user',
+          password: 'pass',
+          syncFolderPath: '/sync',
+        },
+      } as SyncConfig);
+
+      // Verify neither cache was cleared
+      expect(clearCacheSpy).not.toHaveBeenCalled();
+      expect(wrappedProviderService.clearCache).not.toHaveBeenCalled();
+    });
+
+    it('should clear cache via updateEncryptionPassword method', async () => {
+      // Mock existing provider config
+      const mockProvider = {
+        id: SyncProviderId.WebDAV,
+        privateCfg: {
+          load: jasmine.createSpy('load').and.returnValue(
+            Promise.resolve({
+              baseUrl: 'https://example.com/dav',
+              userName: 'user',
+              password: 'pass',
+              syncFolderPath: '/sync',
+              encryptKey: 'oldPassword',
+            }),
+          ),
+        },
+      };
+      (providerManager.getProviderById as jasmine.Spy).and.returnValue(mockProvider);
+      (providerManager.getActiveProvider as jasmine.Spy).and.returnValue(mockProvider);
+
+      // Spy on cache clear
+      const clearCacheSpy = spyOn(service['_derivedKeyCache'], 'clearCache');
+
+      // Update password via dedicated method
+      await service.updateEncryptionPassword('newPassword', SyncProviderId.WebDAV);
+
+      // Verify both caches were cleared
+      expect(clearCacheSpy).toHaveBeenCalled();
+      expect(wrappedProviderService.clearCache).toHaveBeenCalled();
     });
   });
 });

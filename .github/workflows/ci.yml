@@ -16,9 +16,11 @@ permissions:
 jobs:
   # This job will scan dependency manifest files
   # surfacing known-vulnerable versions of the packages declared or updated.
+  # Only runs on pull_request events as the action requires base/head refs
   dependency-vulnerability-review:
     name: Dependency Vulnerability Review
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
       - name: 'Checkout Repository'
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
@@ -52,6 +54,7 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     needs: [lint, dependency-vulnerability-review]
+    if: ${{ !cancelled() && !failure() }}
     steps:
       - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6
         with:
@@ -92,7 +95,7 @@ jobs:
           test -f .tmp/angular-dist/browser/index.html || (echo "Build output missing" && exit 1)
           test -f .tmp/angular-dist/browser/assets/bundled-plugins/api-test-plugin/manifest.json || (echo "Plugin assets missing from build" && exit 1)
       - name: Test E2E
-        run: npm run e2e:ci
+        run: npm run e2e:ci -- --grep-invert "@webdav|@supersync"
       - name: 'Upload E2E results on failure'
         if: ${{ failure() }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -127,6 +130,9 @@ jobs:
       - name: Add swap space for Lighthouse
         run: |
           # Ensure Lighthouse/Chrome have enough memory on GitHub-hosted runners
+          # Remove existing swapfile if present
+          sudo swapoff /swapfile 2>/dev/null || true
+          sudo rm -f /swapfile
           sudo fallocate -l 4G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile

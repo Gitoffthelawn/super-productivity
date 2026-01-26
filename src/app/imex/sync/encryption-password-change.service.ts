@@ -1,44 +1,51 @@
 import { inject, Injectable } from '@angular/core';
 import { SyncProviderManager } from '../../op-log/sync-providers/provider-manager.service';
-import { StateSnapshotService } from '../../op-log/backup/state-snapshot.service';
-import { OperationEncryptionService } from '../../op-log/sync/operation-encryption.service';
-import { VectorClockService } from '../../op-log/sync/vector-clock.service';
-import {
-  CLIENT_ID_PROVIDER,
-  ClientIdProvider,
-} from '../../op-log/util/client-id.provider';
 import { isOperationSyncCapable } from '../../op-log/sync/operation-sync.util';
 import { SyncProviderId } from '../../op-log/sync-providers/provider.const';
 import { SuperSyncPrivateCfg } from '../../op-log/sync-providers/super-sync/super-sync.model';
-import { CURRENT_SCHEMA_VERSION } from '../../op-log/persistence/schema-migration.service';
 import { SyncLog } from '../../core/log';
-import { uuidv7 } from '../../util/uuid-v7';
+import { DerivedKeyCacheService } from '../../op-log/encryption/derived-key-cache.service';
+import { CleanSlateService } from '../../op-log/clean-slate/clean-slate.service';
+import { OperationLogUploadService } from '../../op-log/sync/operation-log-upload.service';
+import { SyncWrapperService } from './sync-wrapper.service';
+import { OperationLogStoreService } from '../../op-log/persistence/operation-log-store.service';
+import { isFullStateOpType } from '../../op-log/core/operation.types';
+import { WrappedProviderService } from '../../op-log/sync-providers/wrapped-provider.service';
 
 /**
  * Service for changing the encryption password for SuperSync.
  *
- * Password change flow:
- * 1. Delete all data on server
- * 2. Upload current state as snapshot with new password
- * 3. Update local config with new password
+ * Password change flow (using clean slate):
+ * 1. Create clean slate locally (generates new client ID, fresh SYNC_IMPORT)
+ * 2. Update local config with new password
+ * 3. Upload SYNC_IMPORT with isCleanSlate=true flag (server deletes all data first)
  */
 @Injectable({
   providedIn: 'root',
 })
 export class EncryptionPasswordChangeService {
   private _providerManager = inject(SyncProviderManager);
-  private _stateSnapshotService = inject(StateSnapshotService);
-  private _encryptionService = inject(OperationEncryptionService);
-  private _vectorClockService = inject(VectorClockService);
-  private _clientIdProvider: ClientIdProvider = inject(CLIENT_ID_PROVIDER);
+  private _cleanSlateService = inject(CleanSlateService);
+  private _uploadService = inject(OperationLogUploadService);
+  private _derivedKeyCache = inject(DerivedKeyCacheService);
+  private _syncWrapper = inject(SyncWrapperService);
+  private _opLogStore = inject(OperationLogStoreService);
+  private _wrappedProviderService = inject(WrappedProviderService);
 
   /**
-   * Changes the encryption password by deleting all server data
-   * and uploading a new encrypted snapshot.
+   * Changes the encryption password using the clean slate approach.
    *
-   * Recovery flow:
-   * - If snapshot upload fails after server deletion, attempts to restore
-   *   using the OLD password so user doesn't lose their server data.
+   * Clean slate flow:
+   * 1. Wait for any ongoing sync to complete and block new syncs
+   * 2. Create local clean slate (new client ID, fresh SYNC_IMPORT operation)
+   * 3. Update config with new encryption password
+   * 4. Upload with isCleanSlate=true flag (server deletes all data first)
+   *
+   * This approach is simpler and more robust than the old approach because:
+   * - Server deletion and upload happen atomically in one transaction
+   * - No need for complex recovery logic
+   * - Fresh client ID prevents any stale operation conflicts
+   * - Sync is blocked during the entire operation to prevent race conditions
    *
    * @param newPassword - The new encryption password
    * @throws Error if sync provider is not SuperSync or not ready
@@ -56,137 +63,87 @@ export class EncryptionPasswordChangeService {
       throw new Error('Sync provider does not support operation sync');
     }
 
-    // Get current config (save old password for recovery)
-    const existingCfg =
-      (await syncProvider.privateCfg.load()) as SuperSyncPrivateCfg | null;
-    const oldPassword = existingCfg?.encryptKey;
-
-    // Get current state
-    SyncLog.normal('EncryptionPasswordChangeService: Getting current state...');
-    const currentState = this._stateSnapshotService.getStateSnapshot();
-    const vectorClock = await this._vectorClockService.getCurrentVectorClock();
-    const clientId = await this._clientIdProvider.loadClientId();
-    if (!clientId) {
-      throw new Error('Client ID not available');
+    // Check for unsynced user operations before proceeding.
+    // Exclude full-state operations (SYNC_IMPORT, BACKUP_IMPORT, REPAIR) as these are
+    // recovery/migration ops from failed attempts, not user work that would be lost.
+    const unsyncedOps = await this._opLogStore.getUnsynced();
+    const unsyncedUserOps = unsyncedOps.filter(
+      (entry) => !isFullStateOpType(entry.op.opType),
+    );
+    if (unsyncedUserOps.length > 0) {
+      throw new Error(
+        `Cannot change password: ${unsyncedUserOps.length} operation(s) have not been synced yet. ` +
+          'Please wait for sync to complete or manually trigger a sync before changing the password.',
+      );
     }
 
-    // Delete all server data
-    SyncLog.normal('EncryptionPasswordChangeService: Deleting server data...');
-    await syncProvider.deleteAllData();
+    // Run the entire password change with sync blocked to prevent race conditions.
+    // This waits for any ongoing sync to complete, then blocks new syncs.
+    await this._syncWrapper.runWithSyncBlocked(async () => {
+      // Get current config
+      const existingCfg =
+        (await syncProvider.privateCfg.load()) as SuperSyncPrivateCfg | null;
 
-    // Encrypt and upload new snapshot
-    SyncLog.normal(
-      'EncryptionPasswordChangeService: Encrypting and uploading snapshot...',
-    );
-    try {
-      const encryptedState = await this._encryptionService.encryptPayload(
-        currentState,
-        newPassword,
-      );
+      // STEP 1: Create clean slate locally
+      // This generates a new client ID, clears local ops, and creates a fresh SYNC_IMPORT
+      SyncLog.normal('EncryptionPasswordChangeService: Creating clean slate...');
+      await this._cleanSlateService.createCleanSlate('ENCRYPTION_CHANGE');
 
-      const response = await syncProvider.uploadSnapshot(
-        encryptedState,
-        clientId,
-        'recovery',
-        vectorClock,
-        CURRENT_SCHEMA_VERSION,
-        true, // isPayloadEncrypted
-        uuidv7(), // opId - server must use this ID
-      );
-
-      if (!response.accepted) {
-        throw new Error(`Snapshot upload failed: ${response.error}`);
-      }
-
-      // Update local config with new password
-      SyncLog.normal('EncryptionPasswordChangeService: Updating local config...');
+      // STEP 2: Update config with new password BEFORE upload
+      // This ensures the upload will use the new password for encryption
+      SyncLog.normal('EncryptionPasswordChangeService: Updating encryption config...');
       await syncProvider.setPrivateCfg({
         ...existingCfg,
         encryptKey: newPassword,
         isEncryptionEnabled: true,
       } as SuperSyncPrivateCfg);
 
-      // Update lastServerSeq to the new snapshot's seq
-      if (response.serverSeq !== undefined) {
-        await syncProvider.setLastServerSeq(response.serverSeq);
-      } else {
-        // serverSeq should always be present when accepted=true
-        // If missing, sync state may be inconsistent
-        SyncLog.err(
-          'EncryptionPasswordChangeService: Snapshot accepted but serverSeq is missing. ' +
-            'Sync state may be inconsistent - consider using "Sync Now" to verify.',
-        );
-      }
+      // Clear cached encryption keys to force re-derivation with new password
+      this._derivedKeyCache.clearCache();
+      // Clear cached adapters to ensure new encryption settings take effect
+      this._wrappedProviderService.clearCache();
 
-      SyncLog.normal('EncryptionPasswordChangeService: Password change complete!');
-    } catch (uploadError) {
-      // CRITICAL: Server data was deleted but new snapshot failed to upload.
-      // Attempt recovery by re-uploading with the old password.
-      SyncLog.err(
-        'EncryptionPasswordChangeService: Snapshot upload failed, attempting recovery...',
-        uploadError,
+      // STEP 3: Upload the SYNC_IMPORT with isCleanSlate=true flag
+      // The server will delete all existing data before accepting the operation
+      SyncLog.normal(
+        'EncryptionPasswordChangeService: Uploading clean slate with new encryption...',
       );
+      try {
+        const result = await this._uploadService.uploadPendingOps(syncProvider, {
+          isCleanSlate: true,
+        });
 
-      if (oldPassword) {
-        try {
-          const recoveryState = await this._encryptionService.encryptPayload(
-            currentState,
-            oldPassword,
-          );
-
-          const recoveryResponse = await syncProvider.uploadSnapshot(
-            recoveryState,
-            clientId,
-            'recovery',
-            vectorClock,
-            CURRENT_SCHEMA_VERSION,
-            true,
-            uuidv7(), // opId - server must use this ID
-          );
-
-          if (recoveryResponse.accepted) {
-            if (recoveryResponse.serverSeq !== undefined) {
-              await syncProvider.setLastServerSeq(recoveryResponse.serverSeq);
-            } else {
-              // serverSeq should always be present when accepted=true
-              // If missing, sync state may be inconsistent
-              SyncLog.err(
-                'EncryptionPasswordChangeService: Recovery succeeded but serverSeq is missing. ' +
-                  'Sync state may be inconsistent - consider using "Sync Now" to re-sync.',
-              );
-            }
-            SyncLog.warn(
-              'EncryptionPasswordChangeService: Restored server data with old password.',
-            );
-            // Throw outside try/catch so caller knows recovery succeeded but password change failed
-            throw new Error(
-              'Password change failed. Server data has been restored with your old password. ' +
-                'Please try again or check your network connection.',
-            );
-          }
-          // Recovery upload was not accepted - fall through to CRITICAL error
-        } catch (recoveryError) {
-          // Only log if this is a genuine recovery failure, not our success throw
-          const isRecoverySuccessError =
-            recoveryError instanceof Error &&
-            recoveryError.message.includes('Server data has been restored');
-          if (isRecoverySuccessError) {
-            // Re-throw the success message to caller
-            throw recoveryError;
-          }
-          SyncLog.err(
-            'EncryptionPasswordChangeService: Recovery also failed!',
-            recoveryError,
+        if (result.uploadedCount === 0) {
+          throw new Error(
+            'No operations uploaded - clean slate may not have been created',
           );
         }
-      }
 
-      // Recovery failed or no old password available
-      throw new Error(
-        'CRITICAL: Password change failed and could not restore server data. ' +
-          'Your local data is safe. Please use "Sync Now" to re-upload your data. ' +
-          `Original error: ${uploadError instanceof Error ? uploadError.message : uploadError}`,
-      );
-    }
+        if (result.rejectedCount > 0) {
+          throw new Error(
+            `Clean slate upload was rejected by server: ${result.rejectedOps[0]?.error || 'Unknown error'}`,
+          );
+        }
+
+        SyncLog.normal('EncryptionPasswordChangeService: Password change complete!');
+      } catch (uploadError) {
+        SyncLog.err(
+          'EncryptionPasswordChangeService: Upload failed - reverting password config',
+          uploadError,
+        );
+
+        // Revert the password change in local config
+        await syncProvider.setPrivateCfg(existingCfg as SuperSyncPrivateCfg);
+        this._derivedKeyCache.clearCache();
+        // Clear cached adapters since encryption settings were reverted
+        this._wrappedProviderService.clearCache();
+
+        throw new Error(
+          `Password change failed: ${uploadError instanceof Error ? uploadError.message : uploadError}. ` +
+            'Local password has been reverted. IMPORTANT: Retry the password change before using normal sync ' +
+            'to avoid sync issues. If problems persist, you may need to re-import your data from backup.',
+        );
+      }
+    });
   }
 }

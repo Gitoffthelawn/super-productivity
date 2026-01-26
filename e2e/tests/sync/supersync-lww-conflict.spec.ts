@@ -1326,11 +1326,11 @@ test.describe('@supersync SuperSync LWW Conflict Resolution', () => {
 
       // 3. Client A deletes the task using reliable keyboard shortcut
       await deleteTask(clientA, taskName);
-      await clientA.page.waitForTimeout(150); // Flush operation to ensure DELETE is created
+      await clientA.page.waitForTimeout(300); // Flush operation to ensure DELETE is created (increased from 150ms)
       console.log('[DeleteRace] Client A deleted task');
 
       // 4. Client B updates the task (with later timestamp)
-      await clientB.page.waitForTimeout(1000); // Ensure UPDATE has later timestamp than DELETE
+      await clientB.page.waitForTimeout(1500); // Ensure UPDATE has later timestamp than DELETE (increased from 1000ms)
 
       const taskLocatorB = clientB.page
         .locator(`task:not(.ng-animating):has-text("${taskName}")`)
@@ -1344,11 +1344,11 @@ test.describe('@supersync SuperSync LWW Conflict Resolution', () => {
       await titleInputB.focus();
       await titleInputB.fill(`${taskName}-Updated`);
       await clientB.page.keyboard.press('Enter');
-      await clientB.page.waitForTimeout(300);
+      await clientB.page.waitForTimeout(500); // Post-edit flush wait (increased from 300ms)
       console.log('[DeleteRace] Client B updated task title');
 
       // Wait to ensure Client B's UPDATE operation is created and flushed
-      await clientB.page.waitForTimeout(1000);
+      await clientB.page.waitForTimeout(1500); // Increased from 1000ms for CI stability
 
       // 5. Client A syncs (uploads delete)
       await clientA.sync.syncAndWait();
@@ -1469,10 +1469,12 @@ test.describe('@supersync SuperSync LWW Conflict Resolution', () => {
       await clientA.sync.syncAndWait();
       console.log('[TodayDeleteRace] Client A synced, LWW applied');
 
-      // Wait for post-sync cooldown (2s) to ensure repair effect runs if needed.
+      // Wait for post-sync cooldown (2s) plus buffer for repair effect to run.
       // The meta-reducer should add task to TODAY_TAG.taskIds immediately, but
       // the repair effect provides a safety net with a 2-second delay.
-      await clientA.page.waitForTimeout(2500);
+      // Extra buffer (1.5s) ensures effect has time to dispatch and render
+      // even under CI resource contention.
+      await clientA.page.waitForTimeout(3500);
       console.log('[TodayDeleteRace] Post-sync cooldown complete');
 
       // 8. CRITICAL ASSERTION: Task should appear in TODAY view on Client A

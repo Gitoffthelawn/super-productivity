@@ -48,6 +48,7 @@ import { DataInitService } from '../../core/data-init/data-init.service';
 import { DialogSyncInitialCfgComponent } from './dialog-sync-initial-cfg/dialog-sync-initial-cfg.component';
 import { DialogIncompleteSyncComponent } from './dialog-incomplete-sync/dialog-incomplete-sync.component';
 import { DialogHandleDecryptErrorComponent } from './dialog-handle-decrypt-error/dialog-handle-decrypt-error.component';
+import { DialogEnterEncryptionPasswordComponent } from './dialog-enter-encryption-password/dialog-enter-encryption-password.component';
 import { DialogIncoherentTimestampsErrorComponent } from './dialog-incoherent-timestamps-error/dialog-incoherent-timestamps-error.component';
 import { SyncLog } from '../../core/log';
 import { promiseTimeout } from '../../util/promise-timeout';
@@ -104,6 +105,13 @@ export class SyncWrapperService {
   isSyncInProgress$ = this._isSyncInProgress$.asObservable();
 
   /**
+   * Flag to block sync during critical encryption operations (password change, enable/disable).
+   * When true, sync() will skip and return immediately. This prevents race conditions where
+   * sync could read partial encryption state during password change.
+   */
+  private _isEncryptionOperationInProgress$ = new BehaviorSubject(false);
+
+  /**
    * Observable for UI: true when all local changes have been uploaded.
    * Used for all sync providers to show the single checkmark indicator.
    */
@@ -156,6 +164,12 @@ export class SyncWrapperService {
   );
 
   async sync(): Promise<SyncStatus | 'HANDLED_ERROR'> {
+    // Block sync if encryption operation is in progress (password change, enable/disable)
+    if (this._isEncryptionOperationInProgress$.getValue()) {
+      SyncLog.log('Sync blocked: encryption operation in progress');
+      return 'HANDLED_ERROR';
+    }
+
     // Race condition fix: Check-and-set atomically before starting sync
     if (this._isSyncInProgress$.getValue()) {
       SyncLog.log('Sync already in progress, skipping concurrent sync attempt');
@@ -172,6 +186,52 @@ export class SyncWrapperService {
         this._providerManager.setSyncStatus('UNKNOWN_OR_CHANGED');
       }
     });
+  }
+
+  /**
+   * Runs an encryption operation (password change, enable, disable) with sync blocked.
+   *
+   * This method:
+   * 1. Waits for any ongoing sync to complete
+   * 2. Blocks new syncs from starting
+   * 3. Runs the operation
+   * 4. Unblocks sync
+   *
+   * This prevents race conditions where sync could interfere with encryption state changes.
+   *
+   * @param operation - The async operation to run with sync blocked
+   * @returns The result of the operation
+   */
+  async runWithSyncBlocked<T>(operation: () => Promise<T>): Promise<T> {
+    // Wait for any ongoing sync to complete (with timeout)
+    if (this._isSyncInProgress$.getValue()) {
+      SyncLog.log('Waiting for ongoing sync to complete before encryption operation...');
+      try {
+        // Race between sync completing and timeout
+        await Promise.race([
+          firstValueFrom(
+            this._isSyncInProgress$.pipe(filter((inProgress) => !inProgress)),
+          ),
+          promiseTimeout(SYNC_WAIT_TIMEOUT_MS).then(() => {
+            throw new Error('Timeout waiting for sync');
+          }),
+        ]);
+      } catch (e) {
+        SyncLog.warn('Timeout waiting for sync to complete, proceeding anyway');
+      }
+    }
+
+    // Block new syncs
+    this._isEncryptionOperationInProgress$.next(true);
+    SyncLog.log('Sync blocked for encryption operation');
+
+    try {
+      return await operation();
+    } finally {
+      // Unblock sync
+      this._isEncryptionOperationInProgress$.next(false);
+      SyncLog.log('Sync unblocked after encryption operation');
+    }
   }
 
   private async _sync(): Promise<SyncStatus | 'HANDLED_ERROR'> {
@@ -315,10 +375,10 @@ export class SyncWrapperService {
           actionStr: T.F.SYNC.S.BTN_FORCE_OVERWRITE,
         });
         return 'HANDLED_ERROR';
-      } else if (
-        error instanceof DecryptNoPasswordError ||
-        error instanceof DecryptError
-      ) {
+      } else if (error instanceof DecryptNoPasswordError) {
+        this._handleMissingPasswordDialog();
+        return 'HANDLED_ERROR';
+      } else if (error instanceof DecryptError) {
         this._handleDecryptionError();
         return 'HANDLED_ERROR';
       } else if (error instanceof CanNotMigrateMajorDownError) {
@@ -530,7 +590,45 @@ export class SyncWrapperService {
     return undefined;
   }
 
+  /**
+   * Handles missing encryption password when receiving encrypted data.
+   * Opens a simple dialog to prompt for the password, then re-syncs.
+   */
+  private _handleMissingPasswordDialog(): void {
+    // Prevent multiple password dialogs from opening simultaneously
+    if (this._passwordDialog) {
+      return;
+    }
+
+    // Set ERROR status so sync button shows error icon
+    this._providerManager.setSyncStatus('ERROR');
+
+    // Open dialog for password entry
+    this._passwordDialog = this._matDialog.open(DialogEnterEncryptionPasswordComponent, {
+      width: '450px',
+      disableClose: true,
+      autoFocus: false,
+    });
+
+    this._passwordDialog.afterClosed().subscribe((result) => {
+      this._passwordDialog = undefined;
+
+      if (result?.password) {
+        // Password was entered and saved, re-sync
+        this.sync();
+      } else {
+        // User cancelled - set status to unknown
+        this._providerManager.setSyncStatus('UNKNOWN_OR_CHANGED');
+      }
+    });
+  }
+
   private _handleDecryptionError(): void {
+    // Prevent multiple password dialogs from opening simultaneously
+    if (this._passwordDialog) {
+      return;
+    }
+
     // Set ERROR status so sync button shows error icon
     this._providerManager.setSyncStatus('ERROR');
 
@@ -542,24 +640,25 @@ export class SyncWrapperService {
     });
 
     // Open dialog for password correction
-    this._matDialog
-      .open(DialogHandleDecryptErrorComponent, {
-        disableClose: true,
-        autoFocus: false,
-      })
-      .afterClosed()
-      .subscribe(({ isReSync, isForceUpload }) => {
-        if (isReSync) {
-          this.sync();
-        }
-        if (isForceUpload) {
-          this.forceUpload();
-        }
-        // Reset status if user cancelled without taking action
-        if (!isReSync && !isForceUpload) {
-          this._providerManager.setSyncStatus('UNKNOWN_OR_CHANGED');
-        }
-      });
+    this._passwordDialog = this._matDialog.open(DialogHandleDecryptErrorComponent, {
+      disableClose: true,
+      autoFocus: false,
+    });
+
+    this._passwordDialog.afterClosed().subscribe(({ isReSync, isForceUpload }) => {
+      this._passwordDialog = undefined;
+
+      if (isReSync) {
+        this.sync();
+      }
+      if (isForceUpload) {
+        this.forceUpload();
+      }
+      // Reset status if user cancelled without taking action
+      if (!isReSync && !isForceUpload) {
+        this._providerManager.setSyncStatus('UNKNOWN_OR_CHANGED');
+      }
+    });
   }
 
   /**
@@ -715,6 +814,12 @@ export class SyncWrapperService {
   }
 
   private lastConflictDialog?: MatDialogRef<any, any>;
+
+  /**
+   * Reference to any open password-related dialog (enter password or decrypt error).
+   * Used to prevent multiple simultaneous password dialogs from opening.
+   */
+  private _passwordDialog?: MatDialogRef<any, any>;
 
   private _openConflictDialog$(
     conflictData: ConflictData,

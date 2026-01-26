@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
 import {
+  MAT_DIALOG_DATA,
   MatDialogActions,
   MatDialogContent,
   MatDialogRef,
@@ -13,11 +14,18 @@ import { MatButton } from '@angular/material/button';
 import { MatIcon } from '@angular/material/icon';
 import { TranslatePipe } from '@ngx-translate/core';
 import { EncryptionPasswordChangeService } from '../encryption-password-change.service';
+import { EncryptionDisableService } from '../encryption-disable.service';
 import { SnackService } from '../../../core/snack/snack.service';
 import { MatProgressSpinner } from '@angular/material/progress-spinner';
+import { MatDivider } from '@angular/material/divider';
 
 export interface ChangeEncryptionPasswordResult {
   success: boolean;
+  encryptionRemoved?: boolean;
+}
+
+export interface ChangeEncryptionPasswordDialogData {
+  mode?: 'full' | 'disable-only';
 }
 
 @Component({
@@ -38,10 +46,12 @@ export interface ChangeEncryptionPasswordResult {
     MatIcon,
     TranslatePipe,
     MatProgressSpinner,
+    MatDivider,
   ],
 })
 export class DialogChangeEncryptionPasswordComponent {
   private _encryptionPasswordChangeService = inject(EncryptionPasswordChangeService);
+  private _encryptionDisableService = inject(EncryptionDisableService);
   private _snackService = inject(SnackService);
   private _matDialogRef =
     inject<
@@ -50,11 +60,16 @@ export class DialogChangeEncryptionPasswordComponent {
         ChangeEncryptionPasswordResult
       >
     >(MatDialogRef);
+  private _data = inject<ChangeEncryptionPasswordDialogData | null>(MAT_DIALOG_DATA, {
+    optional: true,
+  });
 
   T: typeof T = T;
   newPassword = '';
   confirmPassword = '';
   isLoading = signal(false);
+  isRemovingEncryption = signal(false);
+  mode: 'full' | 'disable-only' = this._data?.mode || 'full';
 
   get passwordsMatch(): boolean {
     return this.newPassword === this.confirmPassword;
@@ -90,5 +105,29 @@ export class DialogChangeEncryptionPasswordComponent {
 
   cancel(): void {
     this._matDialogRef.close({ success: false });
+  }
+
+  async removeEncryption(): Promise<void> {
+    if (this.isLoading() || this.isRemovingEncryption()) {
+      return;
+    }
+
+    this.isRemovingEncryption.set(true);
+
+    try {
+      await this._encryptionDisableService.disableEncryption();
+      this._snackService.open({
+        type: 'SUCCESS',
+        msg: T.F.SYNC.FORM.SUPER_SYNC.DISABLE_ENCRYPTION_SUCCESS,
+      });
+      this._matDialogRef.close({ success: true, encryptionRemoved: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this._snackService.open({
+        type: 'ERROR',
+        msg: `Failed to disable encryption: ${message}`,
+      });
+      this.isRemovingEncryption.set(false);
+    }
   }
 }

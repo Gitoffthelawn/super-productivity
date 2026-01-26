@@ -3,7 +3,13 @@ import { MatDialog } from '@angular/material/dialog';
 import {
   DialogChangeEncryptionPasswordComponent,
   ChangeEncryptionPasswordResult,
+  ChangeEncryptionPasswordDialogData,
 } from './dialog-change-encryption-password/dialog-change-encryption-password.component';
+import {
+  DialogEnableEncryptionComponent,
+  EnableEncryptionDialogData,
+  EnableEncryptionResult,
+} from './dialog-enable-encryption/dialog-enable-encryption.component';
 
 /**
  * Singleton service to open the encryption password change dialog.
@@ -15,10 +21,33 @@ import {
 export class EncryptionPasswordDialogOpenerService {
   private _matDialog = inject(MatDialog);
 
-  openChangePasswordDialog(): Promise<ChangeEncryptionPasswordResult | undefined> {
+  openChangePasswordDialog(
+    mode: 'full' | 'disable-only' = 'full',
+  ): Promise<ChangeEncryptionPasswordResult | undefined> {
     const dialogRef = this._matDialog.open(DialogChangeEncryptionPasswordComponent, {
-      width: '400px',
+      width: mode === 'disable-only' ? '450px' : '400px',
       disableClose: true,
+      data: { mode } as ChangeEncryptionPasswordDialogData,
+    });
+
+    return dialogRef.afterClosed().toPromise();
+  }
+
+  /**
+   * Opens the unified change password dialog in disable-only mode.
+   * @deprecated Use openChangePasswordDialog('disable-only') instead
+   */
+  openDisableEncryptionDialog(): Promise<ChangeEncryptionPasswordResult | undefined> {
+    return this.openChangePasswordDialog('disable-only');
+  }
+
+  openEnableEncryptionDialog(
+    encryptKey: string,
+  ): Promise<EnableEncryptionResult | undefined> {
+    const dialogRef = this._matDialog.open(DialogEnableEncryptionComponent, {
+      width: '450px',
+      disableClose: true,
+      data: { encryptKey } as EnableEncryptionDialogData,
     });
 
     return dialogRef.afterClosed().toPromise();
@@ -52,4 +81,32 @@ export const openEncryptionPasswordChangeDialog = (): Promise<
     return Promise.resolve(undefined);
   }
   return dialogOpenerInstance.openChangePasswordDialog();
+};
+
+/**
+ * Opens the disable encryption confirmation dialog.
+ * Can be called from form config onChange handlers.
+ */
+export const openDisableEncryptionDialog = (): Promise<
+  ChangeEncryptionPasswordResult | undefined
+> => {
+  if (!dialogOpenerInstance) {
+    console.error('EncryptionPasswordDialogOpenerService not initialized');
+    return Promise.resolve(undefined);
+  }
+  return dialogOpenerInstance.openDisableEncryptionDialog();
+};
+
+/**
+ * Opens the enable encryption confirmation dialog.
+ * Can be called from form config onChange handlers.
+ */
+export const openEnableEncryptionDialog = (
+  encryptKey: string,
+): Promise<EnableEncryptionResult | undefined> => {
+  if (!dialogOpenerInstance) {
+    console.error('EncryptionPasswordDialogOpenerService not initialized');
+    return Promise.resolve(undefined);
+  }
+  return dialogOpenerInstance.openEnableEncryptionDialog(encryptKey);
 };
