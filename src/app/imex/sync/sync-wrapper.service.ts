@@ -15,6 +15,8 @@ import { toObservable } from '@angular/core/rxjs-interop';
 import {
   SyncAlreadyInProgressError,
   LocalDataConflictError,
+  WebCryptoNotAvailableError,
+  MissingRefreshTokenAPIError,
 } from '../../op-log/core/errors/sync-errors';
 import { SyncConfig } from '../../features/config/global-config.model';
 import { TranslateService } from '@ngx-translate/core';
@@ -130,6 +132,14 @@ export class SyncWrapperService {
 
   isSyncInProgressSync(): boolean {
     return this._isSyncInProgress$.getValue();
+  }
+
+  /**
+   * Returns true if an encryption operation (password change, enable/disable) is in progress.
+   * Used by ImmediateUploadService to avoid uploading during critical encryption operations.
+   */
+  get isEncryptionOperationInProgress(): boolean {
+    return this._isEncryptionOperationInProgress$.getValue();
   }
 
   // Expose shared user input wait state for other services (e.g., SyncTriggerService)
@@ -364,6 +374,15 @@ export class SyncWrapperService {
           actionStr: T.F.SYNC.S.BTN_CONFIGURE,
         });
         return 'HANDLED_ERROR';
+      } else if (error instanceof MissingRefreshTokenAPIError) {
+        // Refresh token is missing or invalid - user needs to re-authenticate
+        this._snackService.open({
+          msg: T.F.SYNC.S.INCOMPLETE_CFG,
+          type: 'ERROR',
+          actionFn: async () => this._matDialog.open(DialogSyncInitialCfgComponent),
+          actionStr: T.F.SYNC.S.BTN_CONFIGURE,
+        });
+        return 'HANDLED_ERROR';
       } else if (error instanceof SyncInvalidTimeValuesError) {
         // Handle async dialog result properly to avoid silent error swallowing
         this._handleIncoherentTimestampsDialog();
@@ -407,6 +426,16 @@ export class SyncWrapperService {
         // File-based sync: Local data exists and remote snapshot would overwrite it
         // Show conflict dialog to let user choose between local and remote data
         return this._handleLocalDataConflict(error);
+      } else if (error instanceof WebCryptoNotAvailableError) {
+        // WebCrypto (crypto.subtle) is unavailable in insecure contexts
+        // (e.g., Android Capacitor serves from http://localhost)
+        this._providerManager.setSyncStatus('ERROR');
+        this._snackService.open({
+          msg: T.F.SYNC.S.WEB_CRYPTO_NOT_AVAILABLE,
+          type: 'ERROR',
+          config: { duration: 15000 },
+        });
+        return 'HANDLED_ERROR';
       } else if (this._isTimeoutError(error)) {
         this._snackService.open({
           msg: T.F.SYNC.S.TIMEOUT_ERROR,
@@ -447,27 +476,34 @@ export class SyncWrapperService {
 
     SyncLog.log('SyncWrapperService: forceUpload called - uploading local state');
 
-    try {
-      const rawProvider = this._providerManager.getActiveProvider();
-      const syncCapableProvider =
-        await this._wrappedProvider.getOperationSyncCapable(rawProvider);
+    // Block parallel syncs during force upload to prevent them from trying to
+    // download/decrypt old data with a potentially different encryption key.
+    // This is critical when forceUpload is triggered after password change.
+    await this.runWithSyncBlocked(async () => {
+      try {
+        const rawProvider = this._providerManager.getActiveProvider();
+        const syncCapableProvider =
+          await this._wrappedProvider.getOperationSyncCapable(rawProvider);
 
-      if (!syncCapableProvider) {
-        SyncLog.warn('SyncWrapperService: Cannot force upload - provider not available');
-        return;
+        if (!syncCapableProvider) {
+          SyncLog.warn(
+            'SyncWrapperService: Cannot force upload - provider not available',
+          );
+          return;
+        }
+
+        await this._opLogSyncService.forceUploadLocalState(syncCapableProvider);
+        this._providerManager.setSyncStatus('IN_SYNC');
+        SyncLog.log('SyncWrapperService: Force upload complete');
+      } catch (error) {
+        SyncLog.err('SyncWrapperService: Force upload failed:', error);
+        const errStr = getSyncErrorStr(error);
+        this._snackService.open({
+          msg: errStr,
+          type: 'ERROR',
+        });
       }
-
-      await this._opLogSyncService.forceUploadLocalState(syncCapableProvider);
-      this._providerManager.setSyncStatus('IN_SYNC');
-      SyncLog.log('SyncWrapperService: Force upload complete');
-    } catch (error) {
-      SyncLog.err('SyncWrapperService: Force upload failed:', error);
-      const errStr = getSyncErrorStr(error);
-      this._snackService.open({
-        msg: errStr,
-        type: 'ERROR',
-      });
-    }
+    });
   }
 
   async configuredAuthForSyncProviderIfNecessary(
@@ -556,6 +592,10 @@ export class SyncWrapperService {
       })
       .catch((err) => {
         SyncLog.err('Error handling incoherent timestamps dialog result:', err);
+        this._snackService.open({
+          type: 'ERROR',
+          msg: T.F.SYNC.S.DIALOG_RESULT_ERROR,
+        });
       });
   }
 
@@ -579,6 +619,10 @@ export class SyncWrapperService {
       })
       .catch((err) => {
         SyncLog.err('Error handling incomplete sync dialog result:', err);
+        this._snackService.open({
+          type: 'ERROR',
+          msg: T.F.SYNC.S.DIALOG_RESULT_ERROR,
+        });
       });
   }
 
