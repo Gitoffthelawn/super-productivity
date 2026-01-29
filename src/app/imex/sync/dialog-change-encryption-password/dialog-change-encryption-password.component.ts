@@ -103,7 +103,10 @@ export class DialogChangeEncryptionPasswordComponent {
       if (this.providerType === 'file-based') {
         await this._fileBasedEncryptionService.changePassword(this.newPassword);
       } else {
-        await this._encryptionPasswordChangeService.changePassword(this.newPassword);
+        // Always allow unsynced ops since password change does a clean slate + overwrite anyway
+        await this._encryptionPasswordChangeService.changePassword(this.newPassword, {
+          allowUnsyncedOps: true,
+        });
       }
       this._snackService.open({
         type: 'SUCCESS',

@@ -21,6 +21,14 @@ import {
 export class EncryptionPasswordDialogOpenerService {
   private _matDialog = inject(MatDialog);
 
+  /**
+   * Closes all open dialogs. Useful after disabling encryption
+   * to close the parent settings dialog.
+   */
+  closeAllDialogs(): void {
+    this._matDialog.closeAll();
+  }
+
   openChangePasswordDialog(
     mode: 'full' | 'disable-only' = 'full',
     providerType: 'supersync' | 'file-based' = 'supersync',
@@ -59,25 +67,21 @@ export class EncryptionPasswordDialogOpenerService {
     return this.openChangePasswordDialog('full', 'file-based');
   }
 
-  openEnableEncryptionDialog(
-    encryptKey: string,
-  ): Promise<EnableEncryptionResult | undefined> {
+  openEnableEncryptionDialog(): Promise<EnableEncryptionResult | undefined> {
     const dialogRef = this._matDialog.open(DialogEnableEncryptionComponent, {
       width: '450px',
       disableClose: true,
-      data: { encryptKey, providerType: 'supersync' } as EnableEncryptionDialogData,
+      data: { providerType: 'supersync' } as EnableEncryptionDialogData,
     });
 
     return dialogRef.afterClosed().toPromise();
   }
 
-  openEnableEncryptionDialogForFileBased(
-    encryptKey: string,
-  ): Promise<EnableEncryptionResult | undefined> {
+  openEnableEncryptionDialogForFileBased(): Promise<EnableEncryptionResult | undefined> {
     const dialogRef = this._matDialog.open(DialogEnableEncryptionComponent, {
       width: '450px',
       disableClose: true,
-      data: { encryptKey, providerType: 'file-based' } as EnableEncryptionDialogData,
+      data: { providerType: 'file-based' } as EnableEncryptionDialogData,
     });
 
     return dialogRef.afterClosed().toPromise();
@@ -144,27 +148,27 @@ export const openDisableEncryptionDialog = (): Promise<
  * Opens the enable encryption confirmation dialog.
  * Can be called from form config onChange handlers.
  */
-export const openEnableEncryptionDialog = (
-  encryptKey: string,
-): Promise<EnableEncryptionResult | undefined> => {
+export const openEnableEncryptionDialog = (): Promise<
+  EnableEncryptionResult | undefined
+> => {
   if (!dialogOpenerInstance) {
     console.error('EncryptionPasswordDialogOpenerService not initialized');
     return Promise.resolve(undefined);
   }
-  return dialogOpenerInstance.openEnableEncryptionDialog(encryptKey);
+  return dialogOpenerInstance.openEnableEncryptionDialog();
 };
 
 /**
  * Opens the enable encryption dialog for file-based providers.
  */
-export const openEnableEncryptionDialogForFileBased = (
-  encryptKey: string,
-): Promise<EnableEncryptionResult | undefined> => {
+export const openEnableEncryptionDialogForFileBased = (): Promise<
+  EnableEncryptionResult | undefined
+> => {
   if (!dialogOpenerInstance) {
     console.error('EncryptionPasswordDialogOpenerService not initialized');
     return Promise.resolve(undefined);
   }
-  return dialogOpenerInstance.openEnableEncryptionDialogForFileBased(encryptKey);
+  return dialogOpenerInstance.openEnableEncryptionDialogForFileBased();
 };
 
 /**
@@ -179,4 +183,16 @@ export const openDisableEncryptionDialogForFileBased = (): Promise<
     return Promise.resolve(undefined);
   }
   return dialogOpenerInstance.openDisableEncryptionDialogForFileBased();
+};
+
+/**
+ * Closes all open dialogs. Useful after disabling encryption
+ * to close the parent settings dialog.
+ */
+export const closeAllDialogs = (): void => {
+  if (!dialogOpenerInstance) {
+    console.error('EncryptionPasswordDialogOpenerService not initialized');
+    return;
+  }
+  dialogOpenerInstance.closeAllDialogs();
 };

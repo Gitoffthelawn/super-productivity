@@ -139,7 +139,7 @@ describe('DialogChangeEncryptionPasswordComponent', () => {
       // After success, dialog closes, loading state may or may not be reset
     });
 
-    it('should call changePassword and close dialog on success', async () => {
+    it('should call changePassword with allowUnsyncedOps and close dialog on success', async () => {
       component.newPassword = 'password123';
       component.confirmPassword = 'password123';
       mockEncryptionPasswordChangeService.changePassword.and.returnValue(
@@ -150,6 +150,7 @@ describe('DialogChangeEncryptionPasswordComponent', () => {
 
       expect(mockEncryptionPasswordChangeService.changePassword).toHaveBeenCalledWith(
         'password123',
+        { allowUnsyncedOps: true },
       );
       expect(mockSnackService.open).toHaveBeenCalledWith(
         jasmine.objectContaining({ type: 'SUCCESS' }),
