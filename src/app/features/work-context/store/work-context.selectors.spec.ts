@@ -478,17 +478,18 @@ describe('workContext selectors', () => {
       expect(result).toEqual(['task1']); // Should be included via dueWithTime fallback
     });
 
-    it('should include task with dueWithTime for today but stale dueDay (fallback)', () => {
+    it('should INCLUDE task with dueWithTime for today even when dueDay is set to different date (dueWithTime takes priority)', () => {
       // Create a timestamp for today (e.g., 8:00 AM today)
       const today = new Date();
       today.setHours(8, 0, 0, 0);
       const todayTimestamp = today.getTime();
 
-      const taskWithStaleDueDay = {
+      // This is a legacy data scenario - with mutual exclusivity, this shouldn't happen in new data
+      const taskWithBothFields = {
         id: 'task1',
         tagIds: [],
-        dueDay: '2000-01-01', // Stale dueDay (not today)
-        dueWithTime: todayTimestamp, // But has dueWithTime for today
+        dueDay: '2000-01-01', // Legacy dueDay set to different date
+        dueWithTime: todayTimestamp, // dueWithTime for today takes priority
         subTaskIds: [],
       } as Partial<TaskCopy> as TaskCopy;
 
@@ -498,10 +499,10 @@ describe('workContext selectors', () => {
       };
 
       const tagState = fakeEntityStateFromArray([todayTagEmpty]);
-      const taskState = fakeEntityStateFromArray([taskWithStaleDueDay]) as any;
+      const taskState = fakeEntityStateFromArray([taskWithBothFields]) as any;
 
       const result = selectTodayTaskIds.projector(tagState, taskState);
-      expect(result).toEqual(['task1']); // Should be included via dueWithTime fallback
+      expect(result).toEqual(['task1']); // dueWithTime takes priority - task IS in today
     });
 
     it('should NOT include task with dueWithTime for tomorrow (no fallback)', () => {
@@ -531,17 +532,18 @@ describe('workContext selectors', () => {
       expect(result).toEqual([]); // Should NOT be included
     });
 
-    it('should prefer dueDay over dueWithTime when both are set for today', () => {
+    it('should use dueWithTime when both are set for today (dueWithTime takes priority)', () => {
       // Create a timestamp for today
       const today = new Date();
       today.setHours(8, 0, 0, 0);
       const todayTimestamp = today.getTime();
 
+      // This is a legacy data scenario - with mutual exclusivity, both wouldn't be set
       const taskWithBoth = {
         id: 'task1',
         tagIds: [],
-        dueDay: todayStr, // dueDay is today
-        dueWithTime: todayTimestamp, // dueWithTime is also today
+        dueDay: todayStr, // dueDay is today (legacy)
+        dueWithTime: todayTimestamp, // dueWithTime is also today - takes priority
         subTaskIds: [],
       } as Partial<TaskCopy> as TaskCopy;
 
@@ -554,7 +556,7 @@ describe('workContext selectors', () => {
       const taskState = fakeEntityStateFromArray([taskWithBoth]) as any;
 
       const result = selectTodayTaskIds.projector(tagState, taskState);
-      expect(result).toEqual(['task1']); // Should be included (no duplicates)
+      expect(result).toEqual(['task1']); // Should be included via dueWithTime (no duplicates)
     });
 
     it('should handle mix of dueDay and dueWithTime fallback tasks', () => {
@@ -591,6 +593,73 @@ describe('workContext selectors', () => {
 
       const result = selectTodayTaskIds.projector(tagState, taskState);
       expect(result).toEqual(['task1', 'task2']); // Both included, task2 appended
+    });
+
+    // Test for dueWithTime priority pattern
+    it('task with dueWithTime for today should be in today list even with stale dueDay', () => {
+      // With mutual exclusivity pattern, dueWithTime takes priority over dueDay
+      // This handles legacy data where both might be set inconsistently
+      const today = new Date();
+      today.setHours(8, 0, 0, 0);
+      const todayTimestamp = today.getTime();
+
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const tomorrowStr = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
+
+      const taskWithConflictingState = {
+        id: 'task1',
+        tagIds: [],
+        dueDay: tomorrowStr, // Legacy dueDay set to tomorrow
+        dueWithTime: todayTimestamp, // But dueWithTime is for today - takes priority
+        subTaskIds: [],
+      } as Partial<TaskCopy> as TaskCopy;
+
+      const todayTagEmpty = {
+        ...TODAY_TAG,
+        taskIds: [],
+      };
+
+      const tagState = fakeEntityStateFromArray([todayTagEmpty]);
+      const taskState = fakeEntityStateFromArray([taskWithConflictingState]) as any;
+
+      const result = selectTodayTaskIds.projector(tagState, taskState);
+      // dueWithTime takes priority - task IS in today (despite stale dueDay)
+      expect(result).toEqual(['task1']);
+    });
+
+    it('task scheduled for tomorrow via dialog should NOT appear in today (mutual exclusivity)', () => {
+      // This tests the mutual exclusivity pattern:
+      // 1. Task starts in "today" list (dueDay = today)
+      // 2. User schedules it for tomorrow via schedule dialog
+      // 3. After scheduling: dueWithTime is set, dueDay is cleared (undefined)
+      // 4. Task should NOT appear in today's list (dueWithTime is for tomorrow)
+
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      tomorrow.setHours(9, 0, 0, 0);
+      const tomorrowTimestamp = tomorrow.getTime();
+
+      // Task that was scheduled for tomorrow - with mutual exclusivity, dueDay is undefined
+      const taskScheduledForTomorrow = {
+        id: 'task1',
+        tagIds: [],
+        dueDay: undefined, // Mutual exclusivity: dueDay cleared when dueWithTime is set
+        dueWithTime: tomorrowTimestamp, // Scheduled for 9am tomorrow
+        subTaskIds: [],
+      } as Partial<TaskCopy> as TaskCopy;
+
+      const todayTagEmpty = {
+        ...TODAY_TAG,
+        taskIds: [], // Task was removed from today tag when scheduled for future
+      };
+
+      const tagState = fakeEntityStateFromArray([todayTagEmpty]);
+      const taskState = fakeEntityStateFromArray([taskScheduledForTomorrow]) as any;
+
+      const result = selectTodayTaskIds.projector(tagState, taskState);
+      // Task should NOT appear in today (dueWithTime is for tomorrow)
+      expect(result).toEqual([]);
     });
   });
 

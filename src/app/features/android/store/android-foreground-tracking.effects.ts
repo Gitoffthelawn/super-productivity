@@ -23,6 +23,7 @@ import { HydrationStateService } from '../../../op-log/apply/hydration-state.ser
 import { SnackService } from '../../../core/snack/snack.service';
 import { GlobalTrackingIntervalService } from '../../../core/global-tracking-interval/global-tracking-interval.service';
 import { OperationWriteFlushService } from '../../../op-log/sync/operation-write-flush.service';
+import { syncTimeSpent } from '../../time-tracking/store/time-tracking.actions';
 
 @Injectable()
 export class AndroidForegroundTrackingEffects {
@@ -348,26 +349,40 @@ export class AndroidForegroundTrackingEffects {
       });
 
       // Handle negative duration (clock skew or service crash)
+      // When native has less time than app, keep the app's value to prevent data loss.
+      // This can happen if the native service crashed and restarted.
       if (duration < 0) {
-        DroidLog.warn('Native time less than app time - possible service crash', {
-          taskId,
-          nativeElapsed: nativeData.elapsedMs,
-          currentTimeSpent,
-          duration,
-        });
-        // Fallback: Trust the native service, reset to its value
-        // This prevents data loss if the native service crashed and restarted
-        this._taskService.addTimeSpent(
-          task,
-          nativeData.elapsedMs,
-          this._dateService.todayStr(),
+        DroidLog.warn(
+          'Native time less than app time - keeping app value to prevent data loss',
+          {
+            taskId,
+            nativeElapsed: nativeData.elapsedMs,
+            currentTimeSpent,
+            duration,
+          },
         );
+        // Don't update time - app has more accurate/higher value
+        // Update native service to show correct time in notification
+        this._safeNativeCall(
+          () => androidInterface.updateTrackingService?.(currentTimeSpent),
+          'Failed to update tracking service after negative duration',
+        );
+        // Reset tracking interval to prevent double-counting
         this._globalTrackingIntervalService.resetTrackingStart();
         return;
       }
 
       if (duration > 0) {
         this._taskService.addTimeSpent(task, duration, this._dateService.todayStr());
+        // Also dispatch syncTimeSpent to capture in operation log
+        // addTimeSpent only updates local state, syncTimeSpent creates the operation
+        this._store.dispatch(
+          syncTimeSpent({
+            taskId: task.id,
+            date: this._dateService.todayStr(),
+            duration,
+          }),
+        );
         // Reset the tracking interval to prevent double-counting
         // The native service has the authoritative time, so we reset the app's
         // interval timer to avoid adding the same time again from tick$

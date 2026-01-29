@@ -23,8 +23,17 @@ import {
   BACKUP_KEY,
   OPS_INDEXES,
 } from './db-keys.const';
+import {
+  DUPLICATE_OPERATION_ERROR_MSG,
+  OPERATION_LOG_STORE_NOT_INITIALIZED,
+} from './op-log-errors.const';
 import { runDbUpgrade } from './db-upgrade';
 import { Log } from '../../core/log';
+import {
+  IDB_OPEN_RETRIES,
+  IDB_OPEN_RETRY_BASE_DELAY_MS,
+} from '../core/operation-log.const';
+import { IndexedDBOpenError } from '../core/errors/indexed-db-open.error';
 import { vectorClockToString } from '../../core/util/vector-clock';
 
 /**
@@ -184,11 +193,47 @@ export class OperationLogStoreService {
   private _vectorClockCache: VectorClock | null = null;
 
   async init(): Promise<void> {
-    this._db = await openDB<OpLogDB>(DB_NAME, DB_VERSION, {
-      upgrade: (db, oldVersion, _newVersion, transaction) => {
-        runDbUpgrade(db, oldVersion, transaction);
-      },
-    });
+    this._db = await this._openDbWithRetry();
+  }
+
+  /**
+   * Opens IndexedDB with retry logic and exponential backoff.
+   * Transient failures (file locks, temporary I/O issues) may resolve on retry.
+   *
+   * Total attempts = 1 initial + IDB_OPEN_RETRIES retries.
+   * With IDB_OPEN_RETRIES=3: attempts at 0ms, 500ms, 1500ms, 3500ms (total ~3.5s worst case).
+   *
+   * @throws IndexedDBOpenError if all retry attempts fail
+   * @see https://github.com/johannesjo/super-productivity/issues/6255
+   */
+  private async _openDbWithRetry(): Promise<IDBPDatabase<OpLogDB>> {
+    const totalAttempts = 1 + IDB_OPEN_RETRIES;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+      try {
+        return await openDB<OpLogDB>(DB_NAME, DB_VERSION, {
+          upgrade: (db, oldVersion, _newVersion, transaction) => {
+            runDbUpgrade(db, oldVersion, transaction);
+          },
+        });
+      } catch (e) {
+        lastError = e;
+
+        if (attempt < totalAttempts) {
+          // Exponential backoff: 500ms, 1000ms, 2000ms for retries 1, 2, 3
+          const delay = IDB_OPEN_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+          Log.warn(
+            `[OpLogStore] IndexedDB open failed (attempt ${attempt}/${totalAttempts}), retrying in ${delay}ms...`,
+            e,
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    // All retries exhausted - throw custom error with context
+    throw new IndexedDBOpenError(lastError);
   }
 
   private get db(): IDBPDatabase<OpLogDB> {
@@ -198,7 +243,7 @@ export class OperationLogStoreService {
       // or make methods async-ready (they are already async).
       // But we can't await in a getter.
       // Let's change the pattern: check in every method.
-      throw new Error('OperationLogStore not initialized. Ensure init() is called.');
+      throw new Error(OPERATION_LOG_STORE_NOT_INITIALIZED);
     }
     return this._db;
   }
@@ -279,9 +324,7 @@ export class OperationLogStoreService {
       if (e instanceof DOMException && e.name === 'ConstraintError') {
         this._appliedOpIdsCache = null;
         this._cacheLastSeq = 0;
-        throw new Error(
-          '[OpLogStore] Duplicate operation detected (likely race condition). See #6213.',
-        );
+        throw new Error(DUPLICATE_OPERATION_ERROR_MSG);
       }
       if (e instanceof DOMException && e.name === 'QuotaExceededError') {
         throw new StorageQuotaExceededError();

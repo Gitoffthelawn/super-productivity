@@ -16,6 +16,7 @@ import {
   openEncryptionPasswordChangeDialog,
   openEncryptionPasswordChangeDialogForFileBased,
 } from '../../../imex/sync/encryption-password-dialog-opener.service';
+import { alertDialog } from '../../../util/native-dialogs';
 
 /**
  * Creates form fields for WebDAV-based sync providers.
@@ -136,6 +137,13 @@ export const SYNC_FORM: ConfigFormSection<SyncConfig> = {
       key: 'localFileSync',
       fieldGroup: [
         {
+          type: 'tpl',
+          templateOptions: {
+            tag: 'p',
+            text: T.F.SYNC.FORM.LOCAL_FILE.INFO_TEXT,
+          },
+        },
+        {
           type: 'btn',
           key: 'syncFolderPath',
           templateOptions: {
@@ -158,6 +166,13 @@ export const SYNC_FORM: ConfigFormSection<SyncConfig> = {
       resetOnHide: true,
       key: 'localFileSync',
       fieldGroup: [
+        {
+          type: 'tpl',
+          templateOptions: {
+            tag: 'p',
+            text: T.F.SYNC.FORM.LOCAL_FILE.INFO_TEXT,
+          },
+        },
         {
           type: 'btn',
           key: 'safFolderUri',
@@ -342,7 +357,7 @@ export const SYNC_FORM: ConfigFormSection<SyncConfig> = {
               if (baseUrl) {
                 window.open(baseUrl, '_blank');
               } else {
-                alert('Please enter a Server URL first');
+                alertDialog('Please enter a Server URL first');
               }
             },
           },
